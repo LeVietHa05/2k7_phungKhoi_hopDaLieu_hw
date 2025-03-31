@@ -1,18 +1,16 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <WiFi.h>
+#include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <Wire.h>
 #include <Adafruit_AHTX0.h>
 #include <ArduinoJson.h>
-
-// Thông tin WiFi
-const char *ssid = "YOUR_WIFI_SSID";
-const char *password = "YOUR_WIFI_PASSWORD";
+#include <WiFiManager.h>
 
 // Thông tin server
-const char *host = "abc.com";
-const int httpsPort = 443;
+#define HOST "your.server.com"
+String serverUrl2 = "https://mmsso.com/update";
 
 // Pin định nghĩa cho ESP32-C3 Super Mini
 #define MQ135_PIN 0 // GPIO4 (ADC1_CH4)
@@ -22,7 +20,6 @@ const int httpsPort = 443;
 
 // Khởi tạo đối tượng
 Adafruit_AHTX0 aht10;
-WiFiClientSecure client;
 
 // Biến toàn cục lưu dữ liệu cảm biến
 float temperature = 0.0;
@@ -45,7 +42,7 @@ void aht10Task(void *pvParameters)
     {
       Serial.println("Failed to read AHT10");
     }
-    vTaskDelay(2000 / portTICK_PERIOD_MS); // Đọc mỗi 2 giây
+    vTaskDelay(pdMS_TO_TICKS(2000)); // Đọc mỗi 2 giây
   }
 }
 
@@ -56,96 +53,79 @@ void analogSensorTask(void *pvParameters)
   {
     mq135_value = analogRead(MQ135_PIN);
     uv_value = analogRead(UV_PIN);
-    vTaskDelay(2000 / portTICK_PERIOD_MS); // Đọc mỗi 2 giây
+    vTaskDelay(pdMS_TO_TICKS(2000)); // Đọc mỗi 2 giây
   }
 }
 
-// Task gửi dữ liệu lên server
+// Task gửi dữ liệu lên server qua GET
 void sendDataTask(void *pvParameters)
 {
   while (1)
   {
     if (WiFi.status() == WL_CONNECTED)
     {
-      if (client.connect(host, httpsPort))
+      HTTPClient http;
+      WiFiClientSecure client;
+      client.setInsecure(); // Bỏ qua kiểm tra chứng chỉ SSL (dùng cho test)
+      String url = serverUrl2 + "?temperature=" + String(temperature) +
+                   "&humidity=" + String(humidity) +
+                   "&uv=" + String(uv_value) +
+                   "&mq135=" + String(mq135_value); // Gửi yêu cầu GET
+      http.begin(client, url);
+      int httpCode = http.GET();
+
+      if (httpCode > 0)
       {
-        // Tạo JSON bằng ArduinoJson v7
-        StaticJsonDocument<200> doc;
-        doc["temperature"] = temperature;
-        doc["humidity"] = humidity;
-        doc["mq135"] = mq135_value;
-        doc["uv"] = uv_value;
-
-        String payload;
-        serializeJson(doc, payload);
-
-        // Gửi HTTP POST request
-        client.println("POST /your_endpoint HTTP/1.1"); // Thay /your_endpoint bằng endpoint thực tế
-        client.println("Host: " + String(host));
-        client.println("Content-Type: application/json");
-        client.println("Content-Length: " + String(payload.length()));
-        client.println();
-        client.print(payload);
-
-        // Đọc response (tuỳ chọn)
-        while (client.connected())
-        {
-          String line = client.readStringUntil('\n');
-          if (line == "\r")
-            break;
-        }
-        String response = client.readString();
-        Serial.println("Server response: " + response);
-
-        client.stop();
+        String payload = http.getString();
+        Serial.println("Response: " + payload);
       }
       else
       {
-        Serial.println("Connection to server failed");
+        Serial.println("HTTP request failed, code: " + String(httpCode));
       }
+
+      http.end();
     }
-    vTaskDelay(10000 / portTICK_PERIOD_MS); // Gửi mỗi 10 giây
+    else
+    {
+      Serial.println("WiFi disconnected");
+    }
   }
+  vTaskDelay(pdMS_TO_TICKS(10000)); // Gửi mỗi 10 giây
 }
 
 // Kết nối WiFi
 void connectWiFi()
 {
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED)
+  WiFiManager wm;
+  bool res = wm.autoConnect("ESP32-C3-Super-Mini", "66668888"); // Tên và mật khẩu WiFi
+  if (!res)
   {
-    delay(500);
-    Serial.print(".");
+    Serial.println("Failed to connect to WiFi");
+    // Reset ESP32
+    ESP.restart();
   }
-  Serial.println("\nConnected to WiFi");
-  Serial.println("IP: " + WiFi.localIP().toString());
+  Serial.println("Connected to WiFi");
 }
 
 void setup()
 {
   Serial.begin(115200);
 
-  // Khởi tạo I2C và AHT10
-  Wire.begin(SDA_PIN, SCL_PIN);
+  // Khởi tạo AHT10
   if (!aht10.begin())
   {
     Serial.println("Could not find AHT10? Check wiring");
-    while (1)
-      delay(10);
   }
   Serial.println("AHT10 found");
 
   // Kết nối WiFi
   connectWiFi();
 
-  // Không cần verify SSL certificate (cho test)
-  client.setInsecure();
-
   // Tạo các task
   xTaskCreate(aht10Task, "AHT10 Task", 2048, NULL, 1, NULL);
   xTaskCreate(analogSensorTask, "Analog Sensor Task", 2048, NULL, 1, NULL);
-  xTaskCreate(sendDataTask, "Send Data Task", 4096, NULL, 1, NULL);
+  xTaskCreate(sendDataTask, "Send Data Task", 20096, NULL, 1, NULL);
 }
 
 void loop()
