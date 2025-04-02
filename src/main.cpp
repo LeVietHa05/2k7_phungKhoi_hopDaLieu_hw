@@ -1,16 +1,19 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <WiFi.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
 #include <Wire.h>
 #include <Adafruit_AHTX0.h>
 #include <ArduinoJson.h>
 #include <WiFiManager.h>
+#include <WiFiManager.h>
+#include <SocketIoClient.h>
 
 // Thông tin server
-#define HOST "your.server.com"
+#define SERVER "your.server.com"
+#define PORT 80
 String serverUrl2 = "https://mmsso.com/update";
+#define TOPIC_UPDATE "message"
+#define TOPIC_CONTROL "control"
 
 // Pin định nghĩa cho ESP32-C3 Super Mini
 #define MQ135_PIN 0 // GPIO4 (ADC1_CH4)
@@ -20,6 +23,7 @@ String serverUrl2 = "https://mmsso.com/update";
 
 // Khởi tạo đối tượng
 Adafruit_AHTX0 aht10;
+SocketIOclient socketIO;
 
 // Biến toàn cục lưu dữ liệu cảm biến
 float temperature = 0.0;
@@ -64,27 +68,20 @@ void sendDataTask(void *pvParameters)
   {
     if (WiFi.status() == WL_CONNECTED)
     {
-      HTTPClient http;
-      WiFiClientSecure client;
-      client.setInsecure(); // Bỏ qua kiểm tra chứng chỉ SSL (dùng cho test)
-      String url = serverUrl2 + "?temperature=" + String(temperature) +
-                   "&humidity=" + String(humidity) +
-                   "&uv=" + String(uv_value) +
-                   "&mq135=" + String(mq135_value); // Gửi yêu cầu GET
-      http.begin(client, url);
-      int httpCode = http.GET();
+      JsonDocument doc;
+      doc.add(TOPIC_UPDATE);
+      JsonObject data = doc.add<JsonObject>();
+      data["TEMP"] = temperature;
+      data["HUM"] = humidity;
+      data["CO2"] = mq135_value;
+      data["UV"] = uv_value;
+      String output;
+      doc.shrinkToFit(); // optional
+      serializeJson(doc, output);
 
-      if (httpCode > 0)
-      {
-        String payload = http.getString();
-        Serial.println("Response: " + payload);
-      }
-      else
-      {
-        Serial.println("HTTP request failed, code: " + String(httpCode));
-      }
-
-      http.end();
+      // Gửi dữ liệu dưới dạng sự kiện Socket.IO
+      socketIO.sendEVENT(output);
+      Serial.println("Sent data: " + output);
     }
     else
     {
@@ -108,6 +105,50 @@ void connectWiFi()
   Serial.println("Connected to WiFi");
 }
 
+#define USE_SERIAL Serial
+void socketIOEvent(socketIOmessageType_t type, uint8_t *payload, size_t length)
+{
+  switch (type)
+  {
+  case sIOtype_DISCONNECT:
+  {
+    USE_SERIAL.printf("[IOc] Disconnected!\n");
+    break;
+  }
+  case sIOtype_CONNECT:
+  {
+    USE_SERIAL.printf("[IOc] Connected to url: %s\n", payload);
+    // join default namespace (no auto join in Socket.IO V3)
+    socketIO.send(sIOtype_CONNECT, "/");
+    break;
+  }
+  case sIOtype_EVENT:
+  {
+    String temp = String((char *)payload);
+    if (temp.indexOf(TOPIC_CONTROL) != -1)
+    {
+      JsonDocument doc;
+      deserializeJson(doc, temp);
+      JsonObject data = doc["data"];
+      int button = data["button"];
+    }
+  }
+  break;
+  case sIOtype_ACK:
+    USE_SERIAL.printf("[IOc] get ack: %u\n", length);
+    break;
+  case sIOtype_ERROR:
+    USE_SERIAL.printf("[IOc] get error: %u\n", length);
+    break;
+  case sIOtype_BINARY_EVENT:
+    USE_SERIAL.printf("[IOc] get binary: %u\n", length);
+    break;
+  case sIOtype_BINARY_ACK:
+    USE_SERIAL.printf("[IOc] get binary ack: %u\n", length);
+    break;
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -122,6 +163,12 @@ void setup()
   // Kết nối WiFi
   connectWiFi();
 
+  // server address, port and URL
+  socketIO.begin(SERVER, PORT, "/socket.io/?EIO=4");
+
+  // event handler
+  socketIO.onEvent(socketIOEvent);
+
   // Tạo các task
   xTaskCreate(aht10Task, "AHT10 Task", 2048, NULL, 1, NULL);
   xTaskCreate(analogSensorTask, "Analog Sensor Task", 2048, NULL, 1, NULL);
@@ -131,4 +178,5 @@ void setup()
 void loop()
 {
   // Không cần code trong loop khi dùng FreeRTOS
+  socketIO.loop();
 }
