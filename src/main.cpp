@@ -9,7 +9,7 @@
 #include <SocketIoClient.h>
 
 // Thông tin server
-#define SERVER "your.server.com"
+#define SERVER "maydokhongkhi.com"
 #define PORT 80
 String serverUrl2 = "https://mmsso.com/update";
 #define TOPIC_UPDATE "message"
@@ -87,8 +87,8 @@ void sendDataTask(void *pvParameters)
     {
       Serial.println("WiFi disconnected");
     }
+    vTaskDelay(pdMS_TO_TICKS(10000)); // Gửi mỗi 10 giây
   }
-  vTaskDelay(pdMS_TO_TICKS(10000)); // Gửi mỗi 10 giây
 }
 
 // Kết nối WiFi
